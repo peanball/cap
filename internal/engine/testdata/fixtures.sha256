@@ -1,0 +1,5 @@
+# sha256 of each fixture, as written by go run ./test.
+2fa189d469a9d5baf02b89d1ce7ebdec9394eacf7de85980c0e35665e68f6eac  unpack_6in6.pcap
+77ae1c956098fc19b8abf58ef4bdca5c593594f2636d58e7e092818269861d10  unpack_4in6.pcap
+eecaf4fa8775d4fd2a462ba4577c9d3b500493a4a0693b5d2003c314175ededc  unpack_proxy_rewrite.pcap
+
