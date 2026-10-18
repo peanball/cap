@@ -1,0 +1,43 @@
+name: pr
+
+on:
+  pull_request: # safe for fork PRs: no secrets, read-only GITHUB_TOKEN
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable' # latest Go release
+
+      - run: go build ./...
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "unformatted files:" >&2
+            echo "$out" >&2
+            exit 1
+          fi
+
+      - run: go vet ./...
+
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+
+      - run: go test -race ./...
+
+      - name: fixture drift
+        # go run ./test is deterministic; a diff means the generator or a
+        # fixture went out of sync with the manifest. See internal/testgenpcap.
+        run: |
+          go run ./test
+          git diff --exit-code -- '*testdata*'
