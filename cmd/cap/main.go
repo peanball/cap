@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,11 +29,12 @@ import (
 
 // Options declares all CLI flags for go-flags.
 type Options struct {
-	// I/O flags follow tcpdump/tshark conventions: -r for read (input file), //// -w for write (output file). Both default to stdin/stdout (-).
 	Input  string `short:"r" long:"read"  default:"-" description:"input pcap file (- for stdin)"`
 	Output string `short:"w" long:"write" default:"-" description:"output pcap file (- for stdout)"`
 
 	Verbose bool `short:"v" long:"verbose" description:"log per-stream stats to stderr at EOF, and per-match progress lines"`
+
+	Version bool `long:"version" description:"print version and exit"`
 
 	Unbuffered bool `short:"U" long:"unbuffered" description:"flush output after every input packet instead of when the 1 MiB output buffer fills (use for live pipes)"`
 
@@ -166,11 +168,49 @@ func main() {
 	}
 }
 
+// version reports the build version for --version. Binaries installed via
+// `go install …@vX.Y.Z` carry the tag in Main.Version; binaries built from a
+// local checkout get a pseudo-version of "<short-sha>[-dirty]" taken from
+// the VCS stamps Go records in every build. No explicit -ldflags -X: that
+// would introduce a second source of truth that can drift from what `go
+// install user@tag` reports.
+func version() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "(unknown)"
+	}
+	if v := bi.Main.Version; v != "" && v != "(devel)" {
+		return v
+	}
+	var rev, dirty string
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+			if len(rev) > 12 {
+				rev = rev[:12]
+			}
+		case "vcs.modified":
+			if s.Value == "true" {
+				dirty = "-dirty"
+			}
+		}
+	}
+	if rev == "" {
+		return "(devel)"
+	}
+	return "0.0.0-devel+g" + rev + dirty
+}
+
 // outBufSize is how much matched output accumulates before it is written
 // when not running with --unbuffered.
 const outBufSize = 1 << 20
 
 func run(o *Options) error {
+	if o.Version {
+		fmt.Fprintf(os.Stdout, "cap %s\n", version())
+		return nil
+	}
 	matcher, keyMatchers, err := buildMatchers(o)
 	if err != nil {
 		return err
