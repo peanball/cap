@@ -126,7 +126,7 @@ Eviction covers idle streams, FIN+FIN, RST, and over-cap new streams. Memory per
 - TLS 1.3 with ECH carries only the public name as SNI; `cap` cannot see through it. See [Encrypted Client Hello](#encrypted-client-hello).
 - Classic pcap and pcapng only; no older libpcap variants (snoop etc.).
 - Mid-stream captures (SYN not observed) are skipped: there is no safe way to attribute client/server direction.
-- IPv4 fragments are not reassembled. First fragments decode; subsequent fragments are dropped silently.
+- IPv4 and IPv6 fragments are reassembled before matching (outer layer, plus the inner of 4-in-6 and 6-in-6 tunnels). A fragment chain that never completes is dropped; its tail never reaches the matcher.
 
 ## License
 

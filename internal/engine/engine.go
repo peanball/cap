@@ -12,6 +12,7 @@ package engine
 
 import (
 	"cmp"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -20,6 +21,8 @@ import (
 	"time"
 
 	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/ip4defrag"
+	"github.com/gopacket/gopacket/ip6defrag"
 	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/reassembly"
 
@@ -27,6 +30,7 @@ import (
 	"go.peanball.net/cap/internal/pcap"
 	"go.peanball.net/cap/internal/proxyhdr"
 	"go.peanball.net/cap/internal/tlsch"
+	"go.peanball.net/cap/internal/wireconv"
 )
 
 // Config controls engine behavior. Zero values are replaced by defaults.
@@ -113,6 +117,21 @@ type Engine struct {
 	// copies. Set on each Process call (inputs are one stream: one type).
 	link pcap.LinkType
 
+	// defrag collects IPv4 fragments per (src,dst,identification) triple
+	// until the reassembled packet's TCP lookup succeeds; bounded internally
+	// by DiscardOlderThan (tied to the same 1 Hz idle sweep as FlushAdvised).
+	defrag *ip4defrag.IPv4Defragmenter
+
+	// defragmented is set for the duration of a Process call whose input was
+	// reassembled from IPv4 fragments; writeRecord appends the marker to the
+	// emitted packet's comment. Single-caller engine, so one flag is enough.
+	defragmented bool
+
+	// defrag6 collects IPv6 fragments per identification value; DefragIPv6
+	// has no WithTimestamp variant, so entries age via DiscardOlderThan from
+	// the same 1 Hz sweep as FlushAdvised.
+	defrag6 *ip6defrag.IPv6Defragmenter
+
 	stats Stats
 
 	// echNames counts ECHDropped by the ClientHello's outer SNI, capped at
@@ -158,7 +177,13 @@ func New(cfg Config, out *pcap.Writer) (*Engine, error) {
 	if cfg.Linger <= 0 {
 		cfg.Linger = 5 * time.Second
 	}
-	e := &Engine{cfg: cfg, out: out, streams: map[flowKey]*streamState{}}
+	e := &Engine{
+		cfg:     cfg,
+		out:     out,
+		streams: map[flowKey]*streamState{},
+		defrag:  ip4defrag.NewIPv4Defragmenter(),
+		defrag6: ip6defrag.NewIPv6Defragmenter(),
+	}
 	fac := &factory{eng: e}
 	e.fac = fac
 	e.pool = reassembly.NewStreamPool(fac)
@@ -179,6 +204,7 @@ func (e *Engine) Process(link pcap.LinkType, ts time.Time, data []byte) error {
 	e.stats.PacketsIn++
 	e.sweepLingering(ts)
 	e.link = link
+	e.defragmented = false
 
 	var pkt gopacket.Packet
 	switch link {
@@ -209,6 +235,221 @@ func (e *Engine) Process(link pcap.LinkType, ts time.Time, data []byte) error {
 		return fmt.Errorf("unsupported linktype %d", link)
 	}
 
+	nfl := pkt.NetworkLayer()
+	if nfl == nil {
+		return nil
+	}
+
+	// IPv4 fragments never enter the TCP path on their own — the TCP lookup
+	// below can't see past gopacket's Fragment layer. Defragment first; the
+	// reassembled packet replaces pkt/data so TCP lookup, assembler, and
+	// emission all see the same view.
+	if ip4, ok := nfl.(*layers.IPv4); ok && (ip4.Flags&layers.IPv4MoreFragments != 0 || ip4.FragOffset != 0) {
+		out, err := e.defrag.DefragIPv4WithTimestamp(ip4, ts)
+		if err != nil {
+			return fmt.Errorf("ip4 defrag: %w", err)
+		}
+		if out == nil {
+			return nil // waiting for more fragments
+		}
+		// Re-encode header+payload ourselves: gopacket's SerializeTo doesn't
+		// include out.Payload under layers.IPv4 (payload belongs to the next
+		// layer in its model), and we want a single byte slice for both the
+		// decoder and the emitted record. The emitted record keeps whatever
+		// link-layer header the wire carried (Ethernet, SLL, PKTAP, ...
+		// anything with one), so emission downstream needs no special case.
+		hdr := make([]byte, 20)
+		hdr[0] = 0x45
+		totalLen := len(hdr) + len(out.Payload)
+		if totalLen > 0xffff {
+			return fmt.Errorf("ip4 defrag: reassembled datagram %d exceeds 16-bit IPv4 length field", totalLen)
+		}
+		binary.BigEndian.PutUint16(hdr[2:4], uint16(totalLen))
+		binary.BigEndian.PutUint16(hdr[4:6], out.Id)
+		// flags/fragment offset left zero (no fragmentation).
+		hdr[8] = out.TTL
+		hdr[9] = byte(out.Protocol)
+		copy(hdr[12:16], out.SrcIP.To4())
+		copy(hdr[16:20], out.DstIP.To4())
+
+		var linkHdrLen int
+		switch link {
+		case pcap.LinkEthernet:
+			linkHdrLen = 14
+		case pcap.LinkLinuxSLL:
+			linkHdrLen = 16
+		case pcap.LinkLinuxSLL2:
+			linkHdrLen = 20
+		case pcap.LinkApplePKTAP:
+			linkHdrLen = 156
+		}
+		body := append(hdr, out.Payload...)
+		data = append(data[:linkHdrLen:linkHdrLen], body...)
+		pkt = gopacket.NewPacket(body, layers.LayerTypeIPv4, gopacket.NoCopy)
+		e.defragmented = true
+		nfl = pkt.NetworkLayer()
+		if nfl == nil {
+			return nil
+		}
+	}
+
+	// IPv6 fragments: Fragment header sits one extension in (NextHeader 44
+	// on the IPv6 header), so nfl is already the IPv6 layer. The Fragment
+	// header itself lives in the layers slice; grab it and feed DefragIPv6.
+	// On reassembly the returned IPv6 has Payload set (gopacket puts it on
+	// the decoded layer) and NextHeader rewritten past the extension chain;
+	// we re-encode so emitted records carry one contiguous IPv6 packet,
+	// like the IPv4 path above.
+	if ip6, ok := nfl.(*layers.IPv6); ok {
+		// Outer fragments only: when the outer's own NextHeader says
+		// Fragment, the Fragment layer found in pkt.Layers() belongs to
+		// the outer chain. An inner fragment inside a tunnel shares
+		// LayerTypeIPv6Fragment so gating on NextHeader (not just "a
+		// fragment exists") is what keeps us from mixing the two.
+		if ip6.NextHeader == layers.IPProtocolIPv6Fragment {
+			fragL := pkt.Layer(layers.LayerTypeIPv6Fragment)
+			if fragL == nil {
+				return nil
+			}
+			fg, isFrag := fragL.(*layers.IPv6Fragment)
+			if !isFrag {
+				return nil
+			}
+			out := e.defrag6.DefragIPv6(ip6, fg)
+			if out == nil {
+				return nil
+			}
+			_ = e.defrag6.DiscardOlderThan(ts.Add(-e.cfg.IdleTimeout))
+			if len(out.Payload) > 0xffff {
+				return fmt.Errorf("ip6 defrag: reassembled payload %d exceeds 16-bit IPv6 Payload Length field", len(out.Payload))
+			}
+			body := spliceReassembled(link, data, hdr6Of(out), out.Payload)
+			data = body
+			pkt = gopacket.NewPacket(data[linkOff(link):], layers.LayerTypeIPv6, gopacket.NoCopy)
+			e.defragmented = true
+			nfl = pkt.NetworkLayer()
+			if nfl == nil {
+				return nil
+			}
+			// Refresh ip6 on the new pkt: the previous *layers.IPv6
+			// points into the old (fragmented) bytes.
+			var ok2 bool
+			ip6, ok2 = nfl.(*layers.IPv6)
+			if !ok2 {
+				return nil
+			}
+		}
+
+		// Inner fragments: reached only when outer was unfragmented or is
+		// just-reassembled; nfl is the outer IPv6 with NextHeader 4/41
+		// (tunnel). gopacket has surfaced the inner header chain as
+		// siblings of the outer IPv6 layer; locate the innermost header
+		// (inner IPv4, second IPv6), defrag if needed, splice the
+		// reassembled inner back between the outer IPv6 header and the
+		// end of data so the emitted packet reads as one contiguous
+		// wire shape (link + outer + whole-inner).
+		if ip6.NextHeader == layers.IPProtocolIPv4 || ip6.NextHeader == layers.IPProtocolIPv6 {
+			var inner gopacket.NetworkLayer
+			n6 := 0
+			for _, lt := range pkt.Layers() {
+				switch il := lt.(type) {
+				case *layers.IPv4:
+					inner = il
+				case *layers.IPv6:
+					n6++
+					if n6 == 2 {
+						inner = il
+					}
+				}
+			}
+			if inner == nil {
+				return nil
+			}
+			var innerBody []byte
+			switch in := inner.(type) {
+			case *layers.IPv4:
+				if in.Flags&layers.IPv4MoreFragments != 0 || in.FragOffset != 0 {
+					out, err := e.defrag.DefragIPv4WithTimestamp(in, ts)
+					if err != nil {
+						return fmt.Errorf("inner ip4 defrag: %w", err)
+					}
+					if out == nil {
+						return nil
+					}
+					innerTotal := 20 + len(out.Payload)
+					if innerTotal < 0 || innerTotal > 0xffff {
+						return fmt.Errorf("inner ip4 defrag: reassembled %d exceeds IPv4 Total Length field", innerTotal)
+					}
+					h := make([]byte, 20)
+					h[0] = 0x45
+					binary.BigEndian.PutUint16(h[2:4], wireconv.MustUint16(innerTotal))
+					binary.BigEndian.PutUint16(h[4:6], out.Id)
+					h[8] = out.TTL
+					h[9] = byte(out.Protocol)
+					copy(h[12:16], out.SrcIP.To4())
+					copy(h[16:20], out.DstIP.To4())
+					innerBody = append(h, out.Payload...)
+				}
+			case *layers.IPv6:
+				// Grab the inner's fragment header: it is the one whose
+				// header-offset sits past the outer IPv6's fixed 40 bytes
+				// (the outer fragment, if any, was consumed above). Using
+				// Contents' start offset relative to `data` would do this
+				// robustly, but LayerContents isn't populated — locate
+				// it by index instead: the outer fragment is the first
+				// in the layers slice, the inner is second (or the only
+				// one when outer wasn't fragmented).
+				var frags []*layers.IPv6Fragment
+				for _, lt := range pkt.Layers() {
+					if fg, isFrag := lt.(*layers.IPv6Fragment); isFrag {
+						frags = append(frags, fg)
+					}
+				}
+				if len(frags) == 0 {
+					break
+				}
+				// Only one fragment we can defrag from here is the inner's
+				// (the outer would already have been consumed above).
+				fg := frags[0]
+				out := e.defrag6.DefragIPv6(in, fg)
+				if out == nil {
+					return nil
+				}
+				_ = e.defrag6.DiscardOlderThan(ts.Add(-e.cfg.IdleTimeout))
+				if len(out.Payload) > 0xffff {
+					return fmt.Errorf("inner ip6 defrag: reassembled payload %d exceeds 16-bit IPv6 Payload Length field", len(out.Payload))
+				}
+				innerBody = append(hdr6Of(out), out.Payload...)
+			}
+			if innerBody != nil {
+				// Splice: link-layer prefix + re-encoded outer IPv6 header
+				// (with PayloadLength patched to the new inner's size and
+				// NextHeader re-set to the tunneled protocol, since the
+				// reassembled inner is again an IPv4/IPv6 packet) + new
+				// inner body. Re-decode so the TCP lookup below sees the
+				// re-built wire image.
+				outerHdr := make([]byte, 40)
+				outerHdr[0] = 0x60
+				if len(innerBody) > 0xffff {
+					return fmt.Errorf("ip6 tunnel: reassembled inner %d exceeds 16-bit IPv6 Payload Length field", len(innerBody))
+				}
+				binary.BigEndian.PutUint16(outerHdr[4:6], wireconv.MustUint16(len(innerBody)))
+				outerHdr[6] = byte(ip6.NextHeader)
+				outerHdr[7] = ip6.HopLimit
+				copy(outerHdr[8:24], ip6.SrcIP)
+				copy(outerHdr[24:40], ip6.DstIP)
+				body := spliceReassembled(link, data, outerHdr, innerBody)
+				data = body
+				pkt = gopacket.NewPacket(data[linkOff(link):], layers.LayerTypeIPv6, gopacket.NoCopy)
+				e.defragmented = true
+				nfl = pkt.NetworkLayer()
+				if nfl == nil {
+					return nil
+				}
+			}
+		}
+	}
+
 	tcpLayer := pkt.Layer(layers.LayerTypeTCP)
 	if tcpLayer == nil {
 		return nil
@@ -217,15 +458,12 @@ func (e *Engine) Process(link pcap.LinkType, ts time.Time, data []byte) error {
 	if !ok {
 		return nil
 	}
-	nfl := pkt.NetworkLayer()
-	if nfl == nil {
-		return nil
-	}
 
 	// Tunnel detection: IPv6 with NextHeader 4 (IPv4 payload) or 41 (a
-	// nested IPv6 packet) means the payload is a tunneled packet.
-	// We peel one layer, decode the inner, but retain outer tuple for
-	// tunneled-stream key matching. Output records remain verbatim.
+	// nested IPv6 packet) means the payload is a tunneled packet. We peel
+	// one layer, decode the inner, but retain outer tuple for tunneled-stream
+	// key matching. Output records remain verbatim. Inner fragments (v4 or
+	// v6) are reassembled here too; outer-fragment chains are handled above.
 	var (
 		srcIP, dstIP       netip.Addr
 		isTunneled         bool
@@ -366,6 +604,10 @@ func (e *Engine) Process(link pcap.LinkType, ts time.Time, data []byte) error {
 	if ts.Sub(e.lastFlush) >= time.Second {
 		e.lastFlush = ts
 		e.asm.FlushCloseOlderThan(ts.Add(-e.cfg.IdleTimeout))
+		// ip4defrag entries are keyed by (src,dst,id) and never expire on
+		// their own; drop anything that hasn't advanced in IdleTimeout so the
+		// "everything is bounded" rule holds for fragment caches too.
+		e.defrag.DiscardOlderThan(ts.Add(-e.cfg.IdleTimeout))
 	}
 	return nil
 }
@@ -549,10 +791,19 @@ func (e *Engine) onComplete(st *streamState) {
 // writeRecord emits one pcap record to the output writer. link is the
 // capture's link type so an ng output can pick the right IDB; classic writers
 // ignore it. comment is attached on the first matched packet of a kept
-// stream (empty string = no comment); classic writers ignore it as well.
+// stream (empty string = no comment); classic writers ignore it as well. If
+// the packet being written was reassembled from IPv4 fragments in this
+// Process call, "ipv4-defragmented" is appended to the comment.
 // It never flushes: when output reaches the consumer is the caller's policy
 // (see cmd/cap -U).
 func (e *Engine) writeRecord(ts time.Time, link pcap.LinkType, data []byte, comment string) error {
+	if e.defragmented {
+		if comment == "" {
+			comment = "ipv4-defragmented"
+		} else {
+			comment = comment + "; ipv4-defragmented"
+		}
+	}
 	rec := pcap.Record{Timestamp: ts, LinkType: link, Data: data}
 	var err error
 	if comment != "" {
@@ -608,4 +859,50 @@ func (s *streamState) pendingBytes() int {
 		n += len(p.data)
 	}
 	return n
+}
+
+// linkOff returns the byte offset at which the IP packet starts under the
+// link layer link: 14 for Ethernet, 16 for Linux SLL, 20 for SLL2, the fixed
+// 156-byte Apple PKTAP header for PKTAP. Raw IP link types (LinkIPv4,
+// LinkIPv6, LinkRaw) carry no link-layer header, so the offset is 0 and the
+// splice path below skips the prefix entirely.
+func linkOff(link pcap.LinkType) int {
+	switch link {
+	case pcap.LinkEthernet:
+		return 14
+	case pcap.LinkLinuxSLL:
+		return 16
+	case pcap.LinkLinuxSLL2:
+		return 20
+	case pcap.LinkApplePKTAP:
+		return 156
+	}
+	return 0
+}
+
+// hdr6Of re-encodes the 40-byte IPv6 fixed header of the (possibly
+// reassembled) packet ip6. Payload Length and Hop Limit follow ip6 as
+// decoded/returned from defrag; Traffic Class/Flow Label are left zero
+// because defrag doesn't preserve them either (gopacket's IPv6 fields
+// omit them on the assembled value).
+func hdr6Of(ip6 *layers.IPv6) []byte {
+	hdr := make([]byte, 40)
+	hdr[0] = 0x60
+	binary.BigEndian.PutUint16(hdr[4:6], wireconv.MustUint16(len(ip6.Payload)))
+	hdr[6] = byte(ip6.NextHeader)
+	hdr[7] = ip6.HopLimit
+	copy(hdr[8:24], ip6.SrcIP)
+	copy(hdr[24:40], ip6.DstIP)
+	return hdr
+}
+
+// spliceReassembled prefixes hdr+body onto data's link-layer prefix (so an
+// emitted Ethernet frame keeps its Ethernet header even though hdr+below
+// re-encodes from the IP layer up) and returns the new full wire image.
+func spliceReassembled(link pcap.LinkType, data, hdr, body []byte) []byte {
+	off := linkOff(link)
+	out := make([]byte, 0, off+len(hdr)+len(body))
+	out = append(out, data[:off]...)
+	out = append(out, hdr...)
+	return append(out, body...)
 }

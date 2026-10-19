@@ -25,3 +25,4 @@ go.work.sum
 # capture files
 *.pcap
 !cmd/cap/testdata/*.pcap
+!internal/engine/testdata/*.pcap

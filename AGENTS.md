@@ -12,7 +12,12 @@ tcpdump -i any -w - -U 'tcp' | cap -U --sni .example.com | tshark -r -
 
 ```
 stdin -> pcap.Reader -> engine.Process(link, ts, data)
-  decode (gopacket) -> tunnel peel -> flowKey -> e.streams lookup
+  decode (gopacket)
+  -> outer-IPv4 defrag (if MF/offset) or outer-IPv6 defrag (if NextHeader 44)
+     -> 4-in-6 / 6-in-6 peel: inner-IPv4 defrag (if MF/offset) or inner-IPv6
+        defrag (if inner has its own Fragment header); splice rebuilt inner
+        back under the link+outer headers and re-decode
+  -> tunnel peel -> flowKey -> e.streams lookup
     new stream:  KeyMatchers.ConsiderKey(StreamInfo) on first packet (reject = untracked)
     undecided:   packet copied to streamState.pending, fed to gopacket Assembler
                  -> streamState.ReassembledSG appends client->server bytes to buf
@@ -32,6 +37,17 @@ data packets rewritten to the header's asserted 5-tuple. PROXY rewrite state
 (header offsets, client SYN ISN, tuple) lives in Engine.proxy keyed by
 flowKey; set in Process on the first SYN and in onMatch once the buffered
 client prefix parses as a PROXY header.
+
+Fragments are reassembled in three places: outer-IPv4 via `ip4defrag`,
+outer-IPv6 via `ip6defrag` when its NextHeader is 44 (RFC 8200 §4.5), and
+the inner of an in-6 tunnel when the peel exposes a fragmented IPv4
+(MF/offset) or an inner IPv6 with its own Fragment header. Each path
+re-encodes a fresh header+payload image, splices it under the link-layer
+prefix, and substitutes `pkt`/`data` so TCP lookup, assembler and emission
+all see one coherent datagram. Entries age on packet time via
+`DiscardOlderThan` from the same 1 Hz sweep that drives `FlushAdvised`.
+A fragment chain that never completes is dropped silently — its tail
+reaches TCP lookup only as fragments, which the TCP layer rejects.
 
 Patterns to preserve:
 
