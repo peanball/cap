@@ -30,7 +30,8 @@ type LinkType = layers.LinkType
 
 const (
 	LinkEthernet   = layers.LinkTypeEthernet
-	LinkRaw        = layers.LinkTypeRaw // DLT_RAW, raw IPv4/IPv6
+	LinkNull       = layers.LinkTypeNull // DLT_NULL, BSD loopback (-i any lo0 on macOS)
+	LinkRaw        = layers.LinkTypeRaw  // DLT_RAW, raw IPv4/IPv6
 	LinkLinuxSLL   = layers.LinkTypeLinuxSLL
 	LinkLinuxSLL2  = layers.LinkTypeLinuxSLL2 // 276
 	LinkIPv4       = layers.LinkTypeIPv4

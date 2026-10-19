@@ -207,6 +207,48 @@ func TestPKTAPDecode(t *testing.T) {
 	}
 }
 
+// TestLoopbackNullDecode proves DLT_NULL (BSD loopback, `-i any` on macOS)
+// decodes and matches identically to Ethernet: a 4-byte PF_ family header
+// precedes the IP packet; the engine skips those 4 bytes and sniffs the IP
+// version nibble to reach TCP. Pins the branch added for "tcpdump -i any"
+// on Darwin, whose lo0 interface carries loopback flows as DLT_NULL.
+func TestLoopbackNullDecode(t *testing.T) {
+	cli, srv := net.ParseIP("10.0.0.1"), net.ParseIP("93.184.216.34")
+
+	// buildNull wraps an IPv4+TCP payload with a 4-byte loopback header
+	// whose family field is little-endian AF_INET (=2) as macOS writes it.
+	buildNull := func(src, dst net.IP, sp, dp uint16, seq, ack uint32, flags uint8, payload []byte) []byte {
+		hdr := make([]byte, 4)
+		binary.LittleEndian.PutUint32(hdr, 2) // PF_INET, host-endian on Darwin = LE
+		return append(hdr, testgenpcap.IPv4TCP(src, dst, sp, dp, seq, ack, flags, payload)...)
+	}
+
+	var out bytes.Buffer
+	eng, err := New(Config{Matcher: stubMatcher{prefix: []byte("GET ")}}, pcap.NewWriterRaw(&out, pcap.LinkEthernet, 65535, false, pcap.FormatClassic))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t0 := time.Unix(1700000000, 0)
+	ms := func(i int) time.Time { return t0.Add(time.Duration(i) * time.Millisecond) }
+
+	frames := [][]byte{
+		buildNull(cli, srv, 51000, 443, 1000, 0, 0x02, nil),                             // SYN
+		buildNull(srv, cli, 443, 51000, 9000, 1001, 0x12, nil),                          // SYN+ACK
+		buildNull(cli, srv, 51000, 443, 1001, 9001, 0x18, []byte("GET / HTTP/1.0\r\n")), // CH-equivalent payload
+	}
+	for i, f := range frames {
+		if err := eng.Process(pcap.LinkNull, ms(i), f); err != nil {
+			t.Fatalf("Process Null %d: %v", i, err)
+		}
+	}
+	if got := eng.Stats().StreamsKept; got != 1 {
+		t.Errorf("StreamsKept = %d, want 1 (loopback GET matched)", got)
+	}
+	if got := eng.Stats().PacketsIn; got != 3 {
+		t.Errorf("PacketsIn = %d, want 3", got)
+	}
+}
+
 // TestReusedTupleIsNotAStraggler: a SYN on the 4-tuple of a lingering stream
 // starts a new connection, so its packets must not be forwarded as late
 // packets of the old one.
