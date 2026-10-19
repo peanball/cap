@@ -11,7 +11,7 @@ import (
 func buildPcap(t *testing.T, nano bool, link LinkType, records []Record) []byte {
 	t.Helper()
 	var buf bytes.Buffer
-	w := NewWriterRaw(&buf, link, 65535, nano)
+	w := NewWriterRaw(&buf, link, 65535, nano, FormatClassic)
 	for _, r := range records {
 		if err := w.Record(r); err != nil {
 			t.Fatalf("write record: %v", err)
@@ -38,6 +38,9 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if r.nanoResolution() {
 		t.Error("nano should be false for µs magic")
+	}
+	if r.Format() != FormatClassic {
+		t.Errorf("Format = %v, want classic", r.Format())
 	}
 	if r.LinkType() != LinkEthernet {
 		t.Errorf("LinkType = %v want %v", r.LinkType(), LinkEthernet)

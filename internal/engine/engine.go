@@ -43,6 +43,12 @@ type Config struct {
 	// FlushCloseOlderThan on each Process call.
 	IdleTimeout time.Duration
 
+	// MatchComment, when non-empty and output format supports it (pcapng), is
+	// attached as an EPB opt_comment to the first matched packet of each kept
+	// stream. Users read it in Wireshark's packet-comments column. cap builds
+	// the string from the CLI's matcher flags.
+	MatchComment string
+
 	// MaxStreams bounds concurrent streams. Past the cap, the factory
 	// returns a discard-all stream — the conn goes untracked. Default 100_000.
 	MaxStreams int
@@ -182,6 +188,10 @@ func (e *Engine) Process(link pcap.LinkType, ts time.Time, data []byte) error {
 		pkt = gopacket.NewPacket(data, layers.LayerTypeLinuxSLL, gopacket.NoCopy)
 	case pcap.LinkLinuxSLL2:
 		pkt = gopacket.NewPacket(data, layers.LayerTypeLinuxSLL2, gopacket.NoCopy)
+	case pcap.LinkApplePKTAP:
+		// Darwin `-i any` wrapper; fork decodes PKTAP and hand-shakes to the
+		// inner Ethernet/IP via the DLT field it carries.
+		pkt = gopacket.NewPacket(data, layers.LayerTypePktap, gopacket.NoCopy)
 	case pcap.LinkIPv4:
 		pkt = gopacket.NewPacket(data, layers.LayerTypeIPv4, gopacket.NoCopy)
 	case pcap.LinkIPv6:
@@ -443,8 +453,15 @@ func (e *Engine) onMatch(st *streamState) {
 			}
 		}
 	}
-	for _, pr := range st.pending {
-		if err := e.emitPacket(st.key, pr.ts, pr.data); err != nil {
+	// The packet whose bytes flipped the verdict to Match is the last of the
+	// pending replay — that's where the ng opt_comment lands.
+	last := len(st.pending) - 1
+	for i, pr := range st.pending {
+		comment := ""
+		if i == last {
+			comment = e.cfg.MatchComment
+		}
+		if err := e.emitPacketComment(st.key, pr.ts, pr.data, comment); err != nil {
 			// Out failures are sticky in the writer; further attempts no-op.
 			return
 		}
@@ -529,14 +546,21 @@ func (e *Engine) onComplete(st *streamState) {
 	}
 }
 
-// writeRecord emits one pcap record to the output writer. It never flushes:
-// when output reaches the consumer is the caller's policy (see cmd/cap -U).
-// Timestamps pass through as time.Time; pcapgo formats the wire field.
-// CapLen defaults to len(data) on the writer side; the engine always writes
-// full frames.
-func (e *Engine) writeRecord(ts time.Time, data []byte) error {
-	rec := pcap.Record{Timestamp: ts, Data: data}
-	if err := e.out.Record(rec); err != nil {
+// writeRecord emits one pcap record to the output writer. link is the
+// capture's link type so an ng output can pick the right IDB; classic writers
+// ignore it. comment is attached on the first matched packet of a kept
+// stream (empty string = no comment); classic writers ignore it as well.
+// It never flushes: when output reaches the consumer is the caller's policy
+// (see cmd/cap -U).
+func (e *Engine) writeRecord(ts time.Time, link pcap.LinkType, data []byte, comment string) error {
+	rec := pcap.Record{Timestamp: ts, LinkType: link, Data: data}
+	var err error
+	if comment != "" {
+		err = e.out.RecordComment(rec, comment)
+	} else {
+		err = e.out.Record(rec)
+	}
+	if err != nil {
 		return err
 	}
 	e.stats.PacketsOut++

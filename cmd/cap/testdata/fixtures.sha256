@@ -1,5 +1,6 @@
 # sha256 of each fixture, as written by go run ./test.
 11246b6cc65d495f162b36d812c3b1ba97d74c8ec926503077cfe524054ffbd2  sni_two_streams.pcap
+43cf851b29df5a4bf22ddda0e4ab9677ba518cf32b02ab97b2787d4abf7fb25c  pktap_sni.pcap
 4a14e72d1eccb51548aac66e01a978893c3220961d7fc16b8e77c04d3a2756e4  tunnel_sni.pcap
 5862328f7e518fd0f07abaf80ae26e82ec86a0d82a3c38a746d68f5af3be4735  sni_fragmented.pcap
 8cd63f4492ac3b5144a5f807f742cb6f3e2e82d420e705f6947793657f740427  tunnel_ip_gate.pcap

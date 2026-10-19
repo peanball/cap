@@ -55,26 +55,32 @@ func (e *Engine) noteUnpack(key flowKey, srcIP, dstIP netip.Addr, tcp *layers.TC
 	e.proxy[key] = pt
 }
 
-// emitPacket writes one packet of a kept connection: the verbatim frame,
-// then any unpack copies (tunnel inner; PROXY rewrites). The verbatim frame
-// always comes first, so output reads as two stacked views of the same
-// on-wire byte sequence.
+// emitPacket writes one packet of a kept connection: the verbatim frame on
+// its incoming link type, then any unpack copies (tunnel inner; PROXY
+// rewrites). The verbatim frame always comes first, so output reads as two
+// stacked views of the same on-wire byte sequence.
 func (e *Engine) emitPacket(key flowKey, ts time.Time, data []byte) error {
-	if err := e.writeRecord(ts, data); err != nil {
+	return e.emitPacketComment(key, ts, data, "")
+}
+
+// emitPacketComment is emitPacket with an optional per-packet comment
+// attached to the verbatim frame (used on the first matched packet of each
+// kept stream). Unpack copies don't carry the comment — they describe what
+// cap produced, not why this packet was kept.
+func (e *Engine) emitPacketComment(key flowKey, ts time.Time, data []byte, comment string) error {
+	if err := e.writeRecord(ts, e.link, data, comment); err != nil {
 		return err
 	}
 	if !e.cfg.Unpack {
 		return nil
 	}
 	if dup, ok := unpack.Tunnel(e.link, data); ok {
-		if err := e.writeRecord(ts, dup); err != nil {
+		if err := e.writeRecord(ts, e.link, dup, ""); err != nil {
 			return err
 		}
 	}
 	pt := e.proxy[key]
 	if pt != nil && pt.has {
-		// A failed PROXY-rewrite dup drops the dup only; the verbatim outer
-		// packet already went out above.
 		if err := e.emitProxy(pt, ts, data); err != nil {
 			return err
 		}
@@ -112,5 +118,5 @@ func (e *Engine) emitProxy(pt *proxyTrack, ts time.Time, data []byte) error {
 	if !ok {
 		return nil
 	}
-	return e.writeRecord(ts, dup)
+	return e.writeRecord(ts, e.link, dup, "")
 }

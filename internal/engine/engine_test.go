@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"slices"
@@ -52,7 +53,7 @@ type harness struct {
 func newHarness(t *testing.T, cfg Config) *harness {
 	t.Helper()
 	var out bytes.Buffer
-	eng, err := New(cfg, pcap.NewWriterRaw(&out, pcap.LinkEthernet, 65535, false))
+	eng, err := New(cfg, pcap.NewWriterRaw(&out, pcap.LinkEthernet, 65535, false, pcap.FormatClassic))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -158,6 +159,54 @@ func TestResetStreamLingers(t *testing.T) {
 	}
 }
 
+// TestPKTAPDecode: a packet arriving on Darwin's `-i any` wire wears a
+// 156-byte PKTAP header whose DLT field says Ethernet and whose payload is
+// the inner frame. The engine must decode through it and track the inner
+// connection as one stream (proven indirectly by the kept counter on match).
+func TestPKTAPDecode(t *testing.T) {
+	cliMAC := []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}
+	srvMAC := []byte{0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb}
+	cli, srv := net.ParseIP("10.0.0.1"), net.ParseIP("93.184.216.34")
+
+	wrap := func(inner []byte) []byte {
+		var hdr [156]byte
+		binary.LittleEndian.PutUint32(hdr[0:4], 156)        // header length
+		binary.LittleEndian.PutUint32(hdr[4:8], 1)          // PKT_REC_PACKET
+		binary.LittleEndian.PutUint32(hdr[8:12], 1)         // DLT_EN10MB = 1
+		copy(hdr[0x0C:0x0C+24], []byte("en0\x00"))          // interface name
+		binary.LittleEndian.PutUint32(hdr[0x28:0x2C], 2)    // AF_INET
+		binary.LittleEndian.PutUint32(hdr[0x2C:0x30], 14)   // link-layer hdr
+		binary.LittleEndian.PutUint32(hdr[0x34:0x38], 4242) // PID
+		copy(hdr[0x38:0x38+20], []byte("curl\x00"))         // command name
+		return append(hdr[:], inner...)
+	}
+
+	var out bytes.Buffer
+	eng, err := New(Config{Matcher: stubMatcher{prefix: []byte("GET ")}}, pcap.NewWriterRaw(&out, pcap.LinkEthernet, 65535, false, pcap.FormatClassic))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t0 := time.Unix(1700000000, 0)
+	ms := func(i int) time.Time { return t0.Add(time.Duration(i) * time.Millisecond) }
+
+	frames := [][]byte{
+		wrap(buildTCPFrame(cliMAC, srvMAC, cli, srv, 51000, 443, 1000, 0, 0x02, nil)),
+		wrap(buildTCPFrame(srvMAC, cliMAC, srv, cli, 443, 51000, 9000, 1001, 0x12, nil)),
+		wrap(buildTCPFrame(cliMAC, srvMAC, cli, srv, 51000, 443, 1001, 9001, 0x18, []byte("GET / HTTP/1.0\r\n"))),
+	}
+	for i, f := range frames {
+		if err := eng.Process(pcap.LinkApplePKTAP, ms(i), f); err != nil {
+			t.Fatalf("Process PKTAP %d: %v", i, err)
+		}
+	}
+	if got := eng.Stats().StreamsKept; got != 1 {
+		t.Errorf("StreamsKept = %d, want 1 (PKTAP-wrapped client GET matched)", got)
+	}
+	if got := eng.Stats().PacketsIn; got != 3 {
+		t.Errorf("PacketsIn = %d, want 3", got)
+	}
+}
+
 // TestReusedTupleIsNotAStraggler: a SYN on the 4-tuple of a lingering stream
 // starts a new connection, so its packets must not be forwarded as late
 // packets of the old one.
@@ -221,7 +270,7 @@ func TestDroppedECHCounted(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	eng, err := New(Config{Matcher: m}, pcap.NewWriterRaw(&out, pcap.LinkEthernet, 65535, false))
+	eng, err := New(Config{Matcher: m}, pcap.NewWriterRaw(&out, pcap.LinkEthernet, 65535, false, pcap.FormatClassic))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +302,7 @@ func TestECHNamesBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	eng, err := New(Config{Matcher: m}, pcap.NewWriterRaw(&out, pcap.LinkEthernet, 65535, false))
+	eng, err := New(Config{Matcher: m}, pcap.NewWriterRaw(&out, pcap.LinkEthernet, 65535, false, pcap.FormatClassic))
 	if err != nil {
 		t.Fatal(err)
 	}

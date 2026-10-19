@@ -34,7 +34,8 @@ Multiple `--sni` flags are OR'd. Matchers of different kinds are AND'd: a stream
 | `--proxy-client-ip CIDR` | PROXY header's original client IP in CIDR. Requires `--proxy`. |
 | `--proxy-client-port PORT` | PROXY header's original client port. Requires `--proxy`. |
 | `--tunnel-ip CIDR` | Stream is IPv4-in-IPv6 or IPv6-in-IPv6 (NextHeader 4 or 41) with a tunnel endpoint in CIDR. |
-| `--tunnel-port PORT` | Same, matching the *inner* TCP port (in-6 tunnels have no outer ports). |
+|`--tunnel-port PORT`|Same, matching the *inner* TCP port (in-6 tunnels have no outer ports).|
+|`--ng MODE`|Output container: `auto` (mirror input — pcapng in, pcapng out), `true` (always pcapng, carries match provenance), `false` (always classic pcap). Default `auto`. See [I/O](#io).|
 
 Examples:
 
@@ -83,7 +84,14 @@ Input and output flags follow `tcpdump` where possible.
 `-r FILE`: input pcap (default `-` = stdin)
 `-w FILE`: output pcap (default `-` = stdout)
 
-`-r`/`-w` follow tcpdump/tshark conventions. Both classic pcap only, Ethernet / Linux SLL / Linux SLL2 / raw IPv4 / raw IPv6 link types. Output preserves input link type and timestamps verbatim.
+`-r`/`-w` follow tcpdump/tshark conventions. Inputs are classic pcap or pcapng (auto-detected from the file magic; per-interface link types are honoured, so merged `mergecap` outputs work). Link types handled: Ethernet / Linux SLL / Linux SLL2 / raw IPv4 / raw IPv6 / Apple PKTAP (Darwin `tcpdump -i any`).
+
+The output container follows the input by default. With pcapng input, pcapng comes out, with one interface description per observed link type so mixed captures survive the filter. Forcible via `--ng=true` (always pcapng, even on classic input) or `--ng=false` (always classic, even on pcapng input). Classic output carries no metadata. pcapng output carries two pieces of provenance:
+
+- IDB `if_filter` on every interface — the matcher flags cap ran with, e.g. `--sni .peanball.net --tunnel-port 443`. Visible in Wireshark under Statistics → Capture File Properties.
+- EPB `opt_comment` on the first packet that flipped a stream to *kept* — same string. Visible in Wireshark's Packet Comments column.
+
+Output preserves input link type (per packet, for pcapng) and packet timestamps verbatim.
 
 All relevant packets of a stream (TCP handshake, ClientHello, ...) are buffered per-stream and replayed in timestamp order on the first match. After a match, the rest of the TCP stream is is forwarded as it arrives.
 
@@ -116,7 +124,7 @@ Eviction covers idle streams, FIN+FIN, RST, and over-cap new streams. Memory per
 ## Known limitations
 
 - TLS 1.3 with ECH carries only the public name as SNI; `cap` cannot see through it. See [Encrypted Client Hello](#encrypted-client-hello).
-- Classic pcap only. Convert pcapng via `editcap -F pcap in.pcapng -`.
+- Classic pcap and pcapng only; no older libpcap variants (snoop etc.).
 - Mid-stream captures (SYN not observed) are skipped: there is no safe way to attribute client/server direction.
 - IPv4 fragments are not reassembled. First fragments decode; subsequent fragments are dropped silently.
 

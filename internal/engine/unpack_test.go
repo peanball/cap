@@ -55,7 +55,7 @@ func readOut(t *testing.T, out []byte) [][]byte {
 
 func runEngineOn(t *testing.T, cfg Config, records []pcap.Record) (out bytes.Buffer, s Stats) {
 	t.Helper()
-	wr := pcap.NewWriterRaw(&out, pcap.LinkEthernet, 65535, false)
+	wr := pcap.NewWriterRaw(&out, pcap.LinkEthernet, 65535, false, pcap.FormatClassic)
 	eng, err := New(cfg, wr)
 	if err != nil {
 		t.Fatalf("New: %v", err)

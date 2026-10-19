@@ -114,6 +114,21 @@ func IPv6TCP(src, dst net.IP, sp, dp uint16, seq, ack uint32, flags uint8, paylo
 	return append(append(ip6, tcp...), payload...)
 }
 
+// PKTAP wraps an inner Ethernet frame in a Darwin PKTAP v1 header (the
+// metadata `-i any` on macOS emits). Records a fixed PID/iface name.
+func PKTAP(inner []byte) []byte {
+	var hdr [156]byte
+	binary.LittleEndian.PutUint32(hdr[0:4], 156)        // header length
+	binary.LittleEndian.PutUint32(hdr[4:8], 1)          // PKT_REC_PACKET
+	binary.LittleEndian.PutUint32(hdr[8:12], 1)         // DLT_EN10MB = 1
+	copy(hdr[0x0C:0x0C+24], []byte("en0\x00"))          // interface name
+	binary.LittleEndian.PutUint32(hdr[0x28:0x2C], 2)    // AF_INET
+	binary.LittleEndian.PutUint32(hdr[0x2C:0x30], 14)   // link-layer hdr len
+	binary.LittleEndian.PutUint32(hdr[0x34:0x38], 4242) // PID
+	copy(hdr[0x38:0x38+20], []byte("curl\x00"))         // command name
+	return append(hdr[:], inner...)
+}
+
 // wrapIn6 puts inner (a bare IPv4 or IPv6 packet) behind an IPv6 header with
 // protocol nh (4=IPv4, 41=IPv6 per RFC 2473).
 func wrapIn6(nh uint8, src6, dst6 net.IP, inner []byte) []byte {

@@ -24,7 +24,7 @@ func TestTunneledSNIMatch(t *testing.T) {
 	records := loadFixture(t, "tunnel_sni.pcap")
 
 	var outBuf bytes.Buffer
-	wr := pcap.NewWriterRaw(&outBuf, pcap.LinkEthernet, 65535, false)
+	wr := pcap.NewWriterRaw(&outBuf, pcap.LinkEthernet, 65535, false, pcap.FormatClassic)
 	m, err := match.NewSNI([]string{"target.example.com"})
 	if err != nil {
 		t.Fatalf("NewSNI: %v", err)
@@ -74,7 +74,7 @@ func TestTunnelIPGate(t *testing.T) {
 	records := loadFixture(t, "tunnel_ip_gate.pcap")
 
 	var outBuf bytes.Buffer
-	wr := pcap.NewWriterRaw(&outBuf, pcap.LinkEthernet, 65535, false)
+	wr := pcap.NewWriterRaw(&outBuf, pcap.LinkEthernet, 65535, false, pcap.FormatClassic)
 
 	cidr := netip.MustParsePrefix("2001:db8::/48")
 	tunnelKM := match.NewTunnelIP([]netip.Prefix{cidr})
@@ -129,7 +129,7 @@ func TestPlainStreamRejectedByTunnelKey(t *testing.T) {
 		50001, 443, 1000, 1, 0x02, nil)
 
 	var outBuf bytes.Buffer
-	wr := pcap.NewWriterRaw(&outBuf, pcap.LinkEthernet, 65535, false)
+	wr := pcap.NewWriterRaw(&outBuf, pcap.LinkEthernet, 65535, false, pcap.FormatClassic)
 
 	cidr := netip.MustParsePrefix("2001:db8::/32")
 	tunnelKM := match.NewTunnelIP([]netip.Prefix{cidr})

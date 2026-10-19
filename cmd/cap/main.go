@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -50,6 +51,34 @@ type Options struct {
 	Linger      time.Duration `long:"linger"       default:"5s"     description:"keep forwarding late packets (final ACK, RSTs) of a closed matched connection this long"`
 
 	Unpack bool `long:"unpack" description:"duplicate matched tunneled/PROXY-fronted packets: inner 4-in-6 packets reframed on the outer link, PROXY data packets rewritten to the asserted client tuple"`
+
+	Ng string `long:"ng" choice:"auto" choice:"true" choice:"false" default:"auto" description:"output container: auto = mirror input (pcapng in ⇒ pcapng out), true = always pcapng (carries match provenance metadata), false = always classic pcap"`
+}
+
+// filterComment renders the matcher-related flags as a single string, used
+// by the ng writer's `if_filter` IDB slot and the per-first-match-packet
+// EPB opt_comment. Empty when no matchers are configured.
+func filterComment(o *Options) string {
+	var parts []string
+	for _, s := range o.SNI {
+		parts = append(parts, "--sni "+s)
+	}
+	if o.Proxy != "" {
+		parts = append(parts, "--proxy "+o.Proxy)
+	}
+	for _, c := range o.ProxyClientIP {
+		parts = append(parts, "--proxy-client-ip "+c)
+	}
+	for _, p := range o.ProxyClientPort {
+		parts = append(parts, fmt.Sprintf("--proxy-client-port %d", p))
+	}
+	for _, c := range o.TunnelIP {
+		parts = append(parts, "--tunnel-ip "+c)
+	}
+	for _, p := range o.TunnelPort {
+		parts = append(parts, fmt.Sprintf("--tunnel-port %d", p))
+	}
+	return strings.Join(parts, " ")
 }
 
 // buildMatchers validates cross-flag constraints and assembles the matcher
@@ -177,6 +206,24 @@ func run(o *Options) error {
 	return stream(o, matcher, keyMatchers, rdr, out, sigs, os.Exit)
 }
 
+// newOutputWriter picks classic vs ng from the --ng flag and the reader's
+// input format, and attaches the filter comment when set.
+func newOutputWriter(o *Options, rdr *pcap.Reader, out io.Writer) *pcap.Writer {
+	fc := filterComment(o)
+	var opts []pcap.WriterOption
+	if fc != "" {
+		opts = append(opts, pcap.WithFilterComment(fc))
+	}
+	switch o.Ng {
+	case "true":
+		return pcap.NewWriterRaw(out, rdr.LinkType(), rdr.Snaplen(), false, pcap.FormatNg, opts...)
+	case "false":
+		return pcap.NewWriterRaw(out, rdr.LinkType(), rdr.Snaplen(), false, pcap.FormatClassic, opts...)
+	default: // auto
+		return pcap.NewWriter(out, rdr, opts...)
+	}
+}
+
 // stream filters rdr into out. Output is block-buffered unless o.Unbuffered,
 // in which case everything a packet produced is flushed before the next one
 // is read. Buffered output is also flushed whenever a kept connection
@@ -196,7 +243,7 @@ func stream(o *Options, matcher match.Matcher, keyMatchers []match.KeyMatcher, r
 	}
 	defer func() { _ = flush() }() // final flush best-effort; errors surface via wr.Err() and the return path
 
-	wr := pcap.NewWriter(bw, rdr)
+	wr := newOutputWriter(o, rdr, bw)
 	if err := wr.Err(); err != nil {
 		return fmt.Errorf("write header: %w", err)
 	}
@@ -209,13 +256,14 @@ func stream(o *Options, matcher match.Matcher, keyMatchers []match.KeyMatcher, r
 	}()
 
 	eng, err := engine.New(engine.Config{
-		Matcher:     matcher,
-		KeyMatchers: keyMatchers,
-		IdleTimeout: o.IdleTimeout,
-		MaxStreams:  o.MaxStreams,
-		WindowBytes: o.Window,
-		Linger:      o.Linger,
-		Unpack:      o.Unpack,
+		Matcher:      matcher,
+		KeyMatchers:  keyMatchers,
+		IdleTimeout:  o.IdleTimeout,
+		MaxStreams:   o.MaxStreams,
+		WindowBytes:  o.Window,
+		Linger:       o.Linger,
+		Unpack:       o.Unpack,
+		MatchComment: filterComment(o),
 	}, wr)
 	if err != nil {
 		return err
@@ -237,7 +285,7 @@ func stream(o *Options, matcher match.Matcher, keyMatchers []match.KeyMatcher, r
 			return err
 		}
 		mu.Lock()
-		err = eng.Process(rdr.LinkType(), rec.Timestamp, rec.Data)
+		err = eng.Process(rec.LinkType, rec.Timestamp, rec.Data)
 		if advised := eng.FlushAdvised(); err == nil && (o.Unbuffered || advised) {
 			err = bw.Flush()
 		}

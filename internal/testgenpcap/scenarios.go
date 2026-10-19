@@ -27,6 +27,7 @@ var cmdCapFixtures = map[string]func() []pcap.Record{
 	"tunnel_sni.pcap":      tunnelSNI,
 	"tunnel_ip_gate.pcap":  tunnelIPGate,
 	"sni_two_streams.pcap": sniTwoStreams,
+	"pktap_sni.pcap":       pktapSNI,
 }
 
 var engineFixtures = map[string]func() []pcap.Record{
@@ -42,6 +43,7 @@ func Dirs() map[string][]string {
 	return map[string][]string{
 		"cmd/cap/testdata": {
 			"sni_fragmented.pcap", "tunnel_sni.pcap", "tunnel_ip_gate.pcap", "sni_two_streams.pcap",
+			"pktap_sni.pcap",
 		},
 		"internal/engine/testdata": {
 			"unpack_4in6.pcap", "unpack_6in6.pcap", "unpack_proxy_rewrite.pcap",
@@ -63,10 +65,14 @@ func Generate(dir, name string) ([]byte, error) {
 }
 
 // Marshal turns records into a classic-pcap byte stream with the same
-// parameters the tests use (Ethernet, snap 65535, µs timestamps).
+// parameters the tests use (Ethernet, snap 65535, µs timestamps). The file's
+// link type is taken from the first record's.
 func Marshal(records []pcap.Record) ([]byte, error) {
+	if len(records) == 0 {
+		return nil, fmt.Errorf("no records to marshal")
+	}
 	var buf bytes.Buffer
-	wr := pcap.NewWriterRaw(&buf, pcap.LinkEthernet, 65535, false)
+	wr := pcap.NewWriterRaw(&buf, records[0].LinkType, 65535, false, pcap.FormatClassic)
 	for _, r := range records {
 		if err := wr.Record(r); err != nil {
 			return nil, err
@@ -96,12 +102,13 @@ func ReadAll(b []byte) ([]pcap.Record, error) {
 	}
 }
 
-// Record constructor.
-
+// Record constructor. Defaults LinkType to Ethernet — the helper's caller
+// overrides it for wrapped formats (PKTAP etc.).
 func rec(data []byte, at time.Time) pcap.Record {
 	return pcap.Record{
 		Timestamp: at,
 		Data:      data,
+		LinkType:  pcap.LinkEthernet,
 	}
 }
 
@@ -210,5 +217,28 @@ func unpackProxyRewrite() []pcap.Record {
 		rec(EthIPv4(mine, proxy, 50000, 443, 1001, 9001, 0x18, hdr), ms(2)),
 		rec(EthIPv4(proxy, mine, 443, 50000, 9001, 1001+uint32(len(hdr)), 0x18, []byte("HTTP/1.1 200")), ms(3)),
 		rec(EthIPv4(mine, proxy, 50000, 443, 1001+uint32(len(hdr)), 9013, 0x18, []byte("more")), ms(4)),
+	}
+}
+
+// pktapSNI is one SNI-matched TCP stream wrapped in Darwin PKTAP headers, as
+// emitted by `tcpdump -i any` on macOS. It exercises the engine's PKTAP
+// decoding and is also the natural shape for ng-input fixtures once generated.
+func pktapSNI() []pcap.Record {
+	cli, srv := ips("10.0.0.1"), ips("93.184.216.34")
+	cs, ds := uint16(51000), uint16(443)
+	ch := TLSCH("target.example.com")
+	// Helper: wrap an Ethernet frame in PKTAP, record with link type PKTAP.
+	wrap := func(frame []byte, at time.Time) pcap.Record {
+		r := rec(PKTAP(frame), at)
+		r.LinkType = pcap.LinkApplePKTAP
+		return r
+	}
+	return []pcap.Record{
+		wrap(EthIPv4(cli, srv, cs, ds, 1000, 0, 0x02, nil), ms(0)),
+		wrap(EthIPv4(srv, cli, ds, cs, 9000, 1001, 0x12, nil), ms(1)),
+		wrap(EthIPv4(cli, srv, cs, ds, 1001, 9001, 0x18, ch), ms(2)),
+		wrap(EthIPv4(srv, cli, ds, cs, 9001, 1001+uint32(len(ch)), 0x18, []byte("resp")), ms(3)),
+		wrap(EthIPv4(cli, srv, cs, ds, 1001+uint32(len(ch)), 9042, 0x11, nil), ms(4)),
+		wrap(EthIPv4(srv, cli, ds, cs, 9042, 1002+uint32(len(ch)), 0x11, nil), ms(5)),
 	}
 }

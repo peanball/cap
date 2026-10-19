@@ -51,7 +51,7 @@ func TestSNIFragmentedCH(t *testing.T) {
 	records := loadFixture(t, "sni_fragmented.pcap")
 
 	var outBuf bytes.Buffer
-	wr := pcap.NewWriterRaw(&outBuf, pcap.LinkEthernet, 65535, false)
+	wr := pcap.NewWriterRaw(&outBuf, pcap.LinkEthernet, 65535, false, pcap.FormatClassic)
 	m, _ := match.NewSNI([]string{"peanball.net"})
 	eng, _ := engine.New(engine.Config{Matcher: m}, wr)
 	for _, r := range records {
@@ -82,7 +82,7 @@ func TestSNIOnlyMatchedStreamKeptInOutput(t *testing.T) {
 	records := loadFixture(t, "sni_two_streams.pcap")
 
 	var outBuf bytes.Buffer
-	wr := pcap.NewWriterRaw(&outBuf, pcap.LinkEthernet, 65535, false)
+	wr := pcap.NewWriterRaw(&outBuf, pcap.LinkEthernet, 65535, false, pcap.FormatClassic)
 	m, err := match.NewSNI([]string{"target.example.com"})
 	if err != nil {
 		t.Fatalf("NewSNI: %v", err)
@@ -152,7 +152,7 @@ func matchedStreamPcap(t *testing.T, nData int, closed bool) ([]byte, int) {
 	ch := buildTLSCH("target.example.com")
 
 	var buf bytes.Buffer
-	wr := pcap.NewWriterRaw(&buf, pcap.LinkEthernet, 65535, false)
+	wr := pcap.NewWriterRaw(&buf, pcap.LinkEthernet, 65535, false, pcap.FormatClassic)
 	t0 := time.Now()
 	n := 0
 	add := func(frame []byte) {
@@ -207,6 +207,95 @@ func runStream(t *testing.T, in io.Reader, o *Options, out io.Writer, sigs <-cha
 	}
 	if err := stream(o, m, nil, rdr, out, sigs, exit); err != nil {
 		t.Fatalf("stream: %v", err)
+	}
+}
+
+// TestNgAutoRoundtrip sends ng input through cap and checks the output is ng
+// (auto mirrors the input container).
+func TestNgAutoRoundtrip(t *testing.T) {
+	records := loadFixture(t, "sni_two_streams.pcap")
+	var in bytes.Buffer
+	if err := func() error {
+		w := pcap.NewWriterRaw(&in, pcap.LinkEthernet, 65535, false, pcap.FormatNg, pcap.WithFilterComment("test-filter"))
+		if w.Err() != nil {
+			return w.Err()
+		}
+		for _, r := range records {
+			if err := w.Record(r); err != nil {
+				return err
+			}
+		}
+		return w.Flush()
+	}(); err != nil {
+		t.Fatal(err)
+	}
+	ngMagic := []byte{0x0a, 0x0d, 0x0d, 0x0a}
+	if got := in.Bytes()[:4]; !bytes.Equal(got, ngMagic) {
+		t.Fatalf("input prep: got magic %x, want pcapng %x", got, ngMagic)
+	}
+
+	var out bytes.Buffer
+	runStream(t, bytes.NewReader(in.Bytes()), &Options{SNI: []string{"target.example.com"}, Ng: "auto"}, &out, nil, func(int) {})
+	if got := out.Bytes()[:4]; !bytes.Equal(got, ngMagic) {
+		t.Errorf("auto output magic: %x, want pcapng %x (auto mirrors ng input)", got, ngMagic)
+	}
+}
+
+// TestPKTAPInputMatchesInner: the pktap_sni.pcap fixture is one TCP stream
+// on Darwin's `-i any` wire; cap fed with --sni must match the inner TLS
+// ClientHello, i.e. the PKTAP wrapper must not be the key.
+func TestPKTAPInputMatchesInner(t *testing.T) {
+	records := loadFixture(t, "pktap_sni.pcap")
+	var in bytes.Buffer
+	// Marshal with linktype = records[0].LinkType so the pcap header says PKTAP.
+	w := pcap.NewWriterRaw(&in, records[0].LinkType, 65535, false, pcap.FormatClassic)
+	for _, r := range records {
+		if err := w.Record(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var out bytes.Buffer
+	runStream(t, bytes.NewReader(in.Bytes()), &Options{SNI: []string{"target.example.com"}}, &out, nil, func(int) {})
+	got := countRecords(t, out.Bytes())
+	if got == 0 {
+		t.Error("no records in output; PKTAP wrapper hid the SNI match")
+	}
+}
+
+// TestNgFlagMatrix runs the two-stream fixture through each --ng value and
+// asserts the output container matches: classic magic for "false", pcapng
+// magic (0a 0d 0d 0a) for "true". "auto" mirrors input — fixture is classic,
+// so auto produces classic here.
+func TestNgFlagMatrix(t *testing.T) {
+	records := loadFixture(t, "sni_two_streams.pcap")
+	var in bytes.Buffer
+	w := pcap.NewWriterRaw(&in, pcap.LinkEthernet, 65535, false, pcap.FormatClassic)
+	for _, r := range records {
+		if err := w.Record(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, ng := range []string{"auto", "true", "false"} {
+		t.Run("ng="+ng, func(t *testing.T) {
+			var out bytes.Buffer
+			runStream(t, bytes.NewReader(in.Bytes()), &Options{SNI: []string{"target.example.com"}, Ng: ng}, &out, nil, func(int) {})
+			got := out.Bytes()[:4]
+			switch ng {
+			case "true":
+				want := []byte{0x0a, 0x0d, 0x0d, 0x0a}
+				if !bytes.Equal(got, want) {
+					t.Errorf("ng=true output magic: %x, want pcapng %x", got, want)
+				}
+			default:
+				// classic pcap µs little-endian: d4 c3 b2 a1
+				want := []byte{0xd4, 0xc3, 0xb2, 0xa1}
+				if !bytes.Equal(got, want) {
+					t.Errorf("ng=%s output magic: %x, want classic %x", ng, got, want)
+				}
+			}
+		})
 	}
 }
 
