@@ -210,6 +210,16 @@ func (e *Engine) Process(link pcap.LinkType, ts time.Time, data []byte) error {
 	switch link {
 	case pcap.LinkEthernet:
 		pkt = gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.NoCopy)
+	case pcap.LinkNull:
+		// BSD loopback: 4-byte PF_ family as host-endian uint32, then the IP
+		// packet. We ignore the family value; the version nibble of byte 4
+		// picks IPv4 vs IPv6 just as it does for LinkRaw. macOS writes
+		// little-endian (02 00 00 00 = AF_INET); the null header's byte
+		// length alone tells us where the IP packet starts regardless.
+		if len(data) < 5 {
+			return nil
+		}
+		pkt = gopacket.NewPacket(data[4:], sniffIPLayerType(data[4]), gopacket.NoCopy)
 	case pcap.LinkLinuxSLL:
 		pkt = gopacket.NewPacket(data, layers.LayerTypeLinuxSLL, gopacket.NoCopy)
 	case pcap.LinkLinuxSLL2:
@@ -226,11 +236,7 @@ func (e *Engine) Process(link pcap.LinkType, ts time.Time, data []byte) error {
 		if len(data) == 0 {
 			return nil
 		}
-		if data[0]>>4 == 6 {
-			pkt = gopacket.NewPacket(data, layers.LayerTypeIPv6, gopacket.NoCopy)
-		} else {
-			pkt = gopacket.NewPacket(data, layers.LayerTypeIPv4, gopacket.NoCopy)
-		}
+		pkt = gopacket.NewPacket(data, sniffIPLayerType(data[0]), gopacket.NoCopy)
 	default:
 		return fmt.Errorf("unsupported linktype %d", link)
 	}
@@ -894,6 +900,16 @@ func hdr6Of(ip6 *layers.IPv6) []byte {
 	copy(hdr[8:24], ip6.SrcIP)
 	copy(hdr[24:40], ip6.DstIP)
 	return hdr
+}
+
+// sniffIPLayerType returns the gopacket LayerType matching the first nibble
+// of an IP packet's Version field (4 or 6). Used for link types whose
+// payload can be either — Raw and Null both reach IP version-agnostically.
+func sniffIPLayerType(first byte) gopacket.LayerType {
+	if first>>4 == 6 {
+		return layers.LayerTypeIPv6
+	}
+	return layers.LayerTypeIPv4
 }
 
 // spliceReassembled prefixes hdr+body onto data's link-layer prefix (so an
