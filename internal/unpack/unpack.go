@@ -282,19 +282,37 @@ func PROXY(link pcap.LinkType, raw []byte, info proxyhdr.Info, clientToServer bo
 	binary.BigEndian.PutUint16(ip[f.ihl:], sp)
 	binary.BigEndian.PutUint16(ip[f.ihl+2:], dp)
 
-	fixup(ip, f.v4, f.ihl)
+	if !fixup(ip, f.v4, f.ihl) {
+		return nil, false
+	}
 	return dup, true
 }
 
 // fixup recomputes IP length fields, IPv4 header checksum (v4) and the TCP
-// checksum of the (modified) packet ip.
-func fixup(ip []byte, v4 bool, ihl int) {
+// checksum of the (modified) packet ip. ok=false when ip exceeds the 16-bit
+// length fields of either wire format — such a packet cannot have arrived
+// from the wire, so the caller must not emit it. Captured input only, so a
+// too-long packet is treated like a parse error rather than panicking.
+func fixup(ip []byte, v4 bool, ihl int) (ok bool) {
+	// Hoisted locals: gosec's range tracker keys per SSA value, so len(ip)
+	// must be named once for the guard on it to cover the cast.
+	n := len(ip)
+	if n > 0xffff {
+		return false
+	}
 	if v4 {
-		binary.BigEndian.PutUint16(ip[2:4], uint16(len(ip)))
+		binary.BigEndian.PutUint16(ip[2:4], uint16(n))
 		binary.BigEndian.PutUint16(ip[10:12], 0)
 		binary.BigEndian.PutUint16(ip[10:12], headerSum(ip[:ihl]))
 	} else {
-		binary.BigEndian.PutUint16(ip[4:6], uint16(len(ip)-40))
+		if n < 40 {
+			return false
+		}
+		payloadLen := n - 40
+		if payloadLen > 0xffff {
+			return false
+		}
+		binary.BigEndian.PutUint16(ip[4:6], uint16(payloadLen))
 	}
 	// TCP checksum over pseudo-header + segment.
 	binary.BigEndian.PutUint16(ip[ihl+16:], 0)
@@ -311,7 +329,11 @@ func fixup(ip []byte, v4 bool, ihl int) {
 		}
 		s += uint32(ip[6])
 	}
-	s += uint32(len(ip) - ihl)
+	segLen := n - ihl
+	if segLen < 0 || segLen > 0xffff {
+		return false
+	}
+	s += uint32(segLen)
 	seg := ip[ihl:]
 	for len(seg) > 1 {
 		s += uint32(binary.BigEndian.Uint16(seg[:2]))
@@ -325,6 +347,7 @@ func fixup(ip []byte, v4 bool, ihl int) {
 		sum = 0xffff
 	}
 	binary.BigEndian.PutUint16(ip[ihl+16:], sum)
+	return true
 }
 
 func headerSum(h []byte) uint16 {

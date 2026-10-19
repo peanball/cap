@@ -10,6 +10,7 @@ import (
 	"go.peanball.net/cap/internal/pcap"
 	"go.peanball.net/cap/internal/proxyhdr"
 	"go.peanball.net/cap/internal/testgenpcap"
+	"go.peanball.net/cap/internal/wireconv"
 )
 
 var (
@@ -161,7 +162,7 @@ func TestProxyDupRewritesTupleAndFixesChecksums(t *testing.T) {
 		t.Errorf("IPv4 header checksum invalid: fold = %#x", got)
 	}
 	// TCP checksum must validate with pseudo-header.
-	if got := tcpSum(dup[:20], dup[20:]); got != 0 {
+	if got := tcpSum(t, dup[:20], dup[20:]); got != 0 {
 		t.Errorf("TCP checksum invalid: fold = %#x", got)
 	}
 	// Seq/flags/payload survive.
@@ -188,14 +189,15 @@ func TestProxyDupSkips(t *testing.T) {
 }
 
 // tcpSum evaluates the TCP checksum (must fold to 0 on a correct packet).
-func tcpSum(iph, seg []byte) uint16 {
+func tcpSum(t *testing.T, iph, seg []byte) uint16 {
+	t.Helper()
 	var s uint32
 	s += uint32(binary.BigEndian.Uint16(iph[12:14]))
 	s += uint32(binary.BigEndian.Uint16(iph[14:16]))
 	s += uint32(binary.BigEndian.Uint16(iph[16:18]))
 	s += uint32(binary.BigEndian.Uint16(iph[18:20]))
 	s += uint32(iph[9])
-	s += uint32(len(seg))
+	s += uint32(wireconv.MustUint16(len(seg)))
 	for len(seg) > 1 {
 		s += uint32(binary.BigEndian.Uint16(seg[:2]))
 		seg = seg[2:]

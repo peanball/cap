@@ -28,19 +28,6 @@ linters:
       # call with `_ =` adds nothing but noise.
       - linters: [errcheck]
         text: "binary\\.Write"
-      # uint16/byte wraps in fixture builders are by design — CH bodies and
-      # frame fields are ≤ 64 KiB by construction.
-      - linters: [gosec]
-        text: "G115"
-        path: _test\.go
-      - linters: [gosec]
-        text: "G115"
-        path: internal/testgenpcap/
-      # internal/unpack computes lengths for IPv4/IPv6/TCP checksum fields
-      # whose wire width is fixed. G115 asks for a clamp tool-side, not here.
-      - linters: [gosec]
-        text: "G115"
-        path: internal/unpack/
       # Constructors for internal matcher types: godoc cost outweighs what
       # the linter can read off the name.
       - linters: [revive]

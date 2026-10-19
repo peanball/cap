@@ -2,6 +2,7 @@ package pcap
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"testing"
 	"time"
@@ -79,7 +80,7 @@ func TestRoundTrip(t *testing.T) {
 func TestEndianness(t *testing.T) {
 	var be bytes.Buffer
 	binary32 := func(v uint32) []byte {
-		return []byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)}
+		return binary.BigEndian.AppendUint32(nil, v)
 	}
 	be.Write(binary32(0xa1b2c3d4)) // µs magic, BE on disk
 	be.Write([]byte{0, 2, 0, 4})   // version 2.4

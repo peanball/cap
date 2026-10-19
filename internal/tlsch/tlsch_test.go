@@ -9,20 +9,22 @@ import (
 	"errors"
 	"net"
 	"testing"
+
+	"go.peanball.net/cap/internal/wireconv"
 )
 
 // ext frames one TLS extension.
 func ext(typ uint16, body []byte) []byte {
 	b := binary.BigEndian.AppendUint16(nil, typ)
-	b = binary.BigEndian.AppendUint16(b, uint16(len(body)))
+	b = binary.BigEndian.AppendUint16(b, wireconv.MustUint16(len(body)))
 	return append(b, body...)
 }
 
 // sniExt is a server_name extension carrying name.
 func sniExt(name string) []byte {
-	entry := append([]byte{0}, binary.BigEndian.AppendUint16(nil, uint16(len(name)))...)
+	entry := append([]byte{0}, binary.BigEndian.AppendUint16(nil, wireconv.MustUint16(len(name)))...)
 	entry = append(entry, name...)
-	list := binary.BigEndian.AppendUint16(nil, uint16(len(entry)))
+	list := binary.BigEndian.AppendUint16(nil, wireconv.MustUint16(len(entry)))
 	return ext(extServerName, append(list, entry...))
 }
 
@@ -32,9 +34,9 @@ func echBody(kdf, aead uint16, configID uint8, enc, payload []byte) []byte {
 	b = binary.BigEndian.AppendUint16(b, kdf)
 	b = binary.BigEndian.AppendUint16(b, aead)
 	b = append(b, configID)
-	b = binary.BigEndian.AppendUint16(b, uint16(len(enc)))
+	b = binary.BigEndian.AppendUint16(b, wireconv.MustUint16(len(enc)))
 	b = append(b, enc...)
-	b = binary.BigEndian.AppendUint16(b, uint16(len(payload)))
+	b = binary.BigEndian.AppendUint16(b, wireconv.MustUint16(len(payload)))
 	return append(b, payload...)
 }
 
@@ -52,19 +54,22 @@ func buildCHExts(t *testing.T, exts ...[]byte) []byte {
 	body.WriteByte(0)              // null compression
 
 	all := bytes.Join(exts, nil)
-	binary.Write(&body, binary.BigEndian, uint16(len(all)))
+	binary.Write(&body, binary.BigEndian, wireconv.MustUint16(len(all)))
 	body.Write(all)
 
 	chBody := body.Bytes()
 	var hs bytes.Buffer
 	hs.WriteByte(1) // client_hello
-	hs.Write([]byte{byte(len(chBody) >> 16), byte(len(chBody) >> 8), byte(len(chBody))})
+	if len(chBody) > 0xffffff {
+		t.Fatalf("CH body overflows 24-bit handshake length")
+	}
+	hs.Write([]byte{wireconv.MustUint8(len(chBody) >> 16), wireconv.MustUint8((len(chBody) >> 8) & 0xff), wireconv.MustUint8(len(chBody) & 0xff)})
 	hs.Write(chBody)
 
 	var rec bytes.Buffer
 	rec.WriteByte(22) // handshake
 	rec.Write([]byte{0x03, 0x01})
-	binary.Write(&rec, binary.BigEndian, uint16(hs.Len()))
+	binary.Write(&rec, binary.BigEndian, wireconv.MustUint16(hs.Len()))
 	rec.Write(hs.Bytes())
 	return rec.Bytes()
 }
@@ -231,19 +236,19 @@ func TestGoClientECH(t *testing.T) {
 	var contents []byte
 	contents = append(contents, 0x2a)                          // config_id
 	contents = binary.BigEndian.AppendUint16(contents, 0x0020) // DHKEM(X25519, HKDF-SHA256)
-	contents = binary.BigEndian.AppendUint16(contents, uint16(len(pub)))
+	contents = binary.BigEndian.AppendUint16(contents, wireconv.MustUint16(len(pub)))
 	contents = append(contents, pub...)
 	contents = binary.BigEndian.AppendUint16(contents, 4)      // cipher_suites length
 	contents = binary.BigEndian.AppendUint16(contents, 0x0001) // HKDF-SHA256
 	contents = binary.BigEndian.AppendUint16(contents, 0x0001) // AES-128-GCM
 	contents = append(contents, 32)                            // maximum_name_length
-	contents = append(contents, byte(len(public)))
+	contents = append(contents, wireconv.MustUint8(len(public)))
 	contents = append(contents, public...)
 	contents = binary.BigEndian.AppendUint16(contents, 0) // extensions
 	cfg := binary.BigEndian.AppendUint16(nil, extECH)     // version
-	cfg = binary.BigEndian.AppendUint16(cfg, uint16(len(contents)))
+	cfg = binary.BigEndian.AppendUint16(cfg, wireconv.MustUint16(len(contents)))
 	cfg = append(cfg, contents...)
-	list := binary.BigEndian.AppendUint16(nil, uint16(len(cfg)))
+	list := binary.BigEndian.AppendUint16(nil, wireconv.MustUint16(len(cfg)))
 	list = append(list, cfg...)
 
 	// Capture the client's first flight; the handshake then fails when the

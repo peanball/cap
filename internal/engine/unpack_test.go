@@ -179,8 +179,8 @@ func TestProxyUnpackRewritesTuple(t *testing.T) {
 	}
 	// Expected dups: server→client data packet, and the client→server data
 	// packet after the header. The header packet gets no dup.
-	want := len(recs) + 2
-	if int(onStats.PacketsOut) != want {
+	want := uint64(len(recs) + 2)
+	if onStats.PacketsOut != want {
 		t.Fatalf("on: %d packets out, want %d", onStats.PacketsOut, want)
 	}
 	frames := readOut(t, onOut.Bytes())

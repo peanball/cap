@@ -2,9 +2,12 @@ package proxyhdr
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"net/netip"
 	"testing"
+
+	"go.peanball.net/cap/internal/wireconv"
 )
 
 func TestV1TCP4(t *testing.T) {
@@ -87,10 +90,8 @@ func buildV2(src, dst string, sport, dport uint16) []byte {
 	buf[15] = 12
 	copy(buf[16:20], s[:])
 	copy(buf[20:24], d[:])
-	buf[24] = byte(sport >> 8)
-	buf[25] = byte(sport)
-	buf[26] = byte(dport >> 8)
-	buf[27] = byte(dport)
+	binary.BigEndian.PutUint16(buf[24:26], sport)
+	binary.BigEndian.PutUint16(buf[26:28], dport)
 	return buf
 }
 
@@ -141,7 +142,7 @@ func TestV2WithTLVs(t *testing.T) {
 	// Append a TLV of 5 bytes after the 12-byte addr.
 	tlv := []byte{0x01, 0x00, 0x05, 'h', 'e', 'l', 'l', 'o'}
 	buf := append(base, tlv...)
-	buf[15] = 12 + uint8(len(tlv))
+	buf[15] = 12 + wireconv.MustUint8(len(tlv))
 	info, err := Parse(buf)
 	if err != nil {
 		t.Fatalf("Parse with TLVs: %v", err)

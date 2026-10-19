@@ -11,6 +11,8 @@ import (
 	"encoding/binary"
 	"net"
 	"time"
+
+	"go.peanball.net/cap/internal/wireconv"
 )
 
 // Well-known header sizes. Tests assert on slices of frames a builder just
@@ -51,25 +53,28 @@ func TLSCH(sni string) []byte {
 
 	var sniList bytes.Buffer
 	sniList.WriteByte(0)
-	binary.Write(&sniList, binary.BigEndian, uint16(len(sni)))
+	binary.Write(&sniList, binary.BigEndian, wireconv.MustUint16(len(sni)))
 	sniList.WriteString(sni)
 	var ext bytes.Buffer
 	binary.Write(&ext, binary.BigEndian, uint16(0))
-	binary.Write(&ext, binary.BigEndian, uint16(sniList.Len()+2))
-	binary.Write(&ext, binary.BigEndian, uint16(sniList.Len()))
+	binary.Write(&ext, binary.BigEndian, wireconv.MustUint16(sniList.Len()+2))
+	binary.Write(&ext, binary.BigEndian, wireconv.MustUint16(sniList.Len()))
 	ext.Write(sniList.Bytes())
-	binary.Write(&body, binary.BigEndian, uint16(ext.Len()))
+	binary.Write(&body, binary.BigEndian, wireconv.MustUint16(ext.Len()))
 	body.Write(ext.Bytes())
 
 	var hs bytes.Buffer
 	hs.WriteByte(1)
-	hs.Write([]byte{0, byte(body.Len() >> 8), byte(body.Len())})
+	if body.Len() > 0xffffff {
+		panic("testgenpcap: ClientHello body overflows 24-bit handshake length")
+	}
+	hs.Write([]byte{0, wireconv.MustUint8((body.Len() >> 8) & 0xff), wireconv.MustUint8(body.Len() & 0xff)})
 	hs.Write(body.Bytes())
 
 	var rec bytes.Buffer
 	rec.WriteByte(22)
 	rec.Write([]byte{0x03, 0x01})
-	binary.Write(&rec, binary.BigEndian, uint16(hs.Len()))
+	binary.Write(&rec, binary.BigEndian, wireconv.MustUint16(hs.Len()))
 	rec.Write(hs.Bytes())
 	return rec.Bytes()
 }
@@ -80,7 +85,7 @@ func TLSCH(sni string) []byte {
 func IPv4TCP(src, dst net.IP, sp, dp uint16, seq, ack uint32, flags uint8, payload []byte) []byte {
 	ip := make([]byte, IPv4HdrLen)
 	ip[0] = 0x45
-	binary.BigEndian.PutUint16(ip[2:4], uint16(IPv4HdrLen+TCPHdrLen+len(payload)))
+	binary.BigEndian.PutUint16(ip[2:4], wireconv.MustUint16(IPv4HdrLen+TCPHdrLen+len(payload)))
 	ip[8] = 64
 	ip[9] = 6
 	copy(ip[12:16], src.To4())
@@ -99,7 +104,7 @@ func IPv4TCP(src, dst net.IP, sp, dp uint16, seq, ack uint32, flags uint8, paylo
 func IPv6TCP(src, dst net.IP, sp, dp uint16, seq, ack uint32, flags uint8, payload []byte) []byte {
 	ip6 := make([]byte, IPv6HdrLen)
 	ip6[0] = 0x60
-	binary.BigEndian.PutUint16(ip6[4:6], uint16(TCPHdrLen+len(payload)))
+	binary.BigEndian.PutUint16(ip6[4:6], wireconv.MustUint16(TCPHdrLen+len(payload)))
 	ip6[6] = 6
 	ip6[7] = 64
 	copy(ip6[8:24], src.To16())
@@ -134,7 +139,7 @@ func PKTAP(inner []byte) []byte {
 func wrapIn6(nh uint8, src6, dst6 net.IP, inner []byte) []byte {
 	ip6 := make([]byte, IPv6HdrLen)
 	ip6[0] = 0x60
-	binary.BigEndian.PutUint16(ip6[4:6], uint16(len(inner)))
+	binary.BigEndian.PutUint16(ip6[4:6], wireconv.MustUint16(len(inner)))
 	ip6[6] = nh
 	ip6[7] = 64
 	copy(ip6[8:24], src6.To16())
@@ -155,12 +160,12 @@ func IPv6(nh uint8, src, dst net.IP, payload []byte) []byte {
 func CH(sni string, ech bool) []byte {
 	ext := func(typ uint16, body []byte) []byte {
 		b := binary.BigEndian.AppendUint16(nil, typ)
-		b = binary.BigEndian.AppendUint16(b, uint16(len(body)))
+		b = binary.BigEndian.AppendUint16(b, wireconv.MustUint16(len(body)))
 		return append(b, body...)
 	}
-	entry := append([]byte{0}, binary.BigEndian.AppendUint16(nil, uint16(len(sni)))...)
+	entry := append([]byte{0}, binary.BigEndian.AppendUint16(nil, wireconv.MustUint16(len(sni)))...)
 	entry = append(entry, sni...)
-	list := binary.BigEndian.AppendUint16(nil, uint16(len(entry)))
+	list := binary.BigEndian.AppendUint16(nil, wireconv.MustUint16(len(entry)))
 	exts := ext(0, append(list, entry...))
 	if ech {
 		b := []byte{0, 0, 1, 0, 1, 0x42} // outer, kdf 1, aead 1, config_id
@@ -176,13 +181,16 @@ func CH(sni string, ech bool) []byte {
 	body = append(body, 0)                // session_id len
 	body = append(body, 0, 2, 0x13, 0x01) // cipher suites
 	body = append(body, 1, 0)             // compression
-	body = binary.BigEndian.AppendUint16(body, uint16(len(exts)))
+	body = binary.BigEndian.AppendUint16(body, wireconv.MustUint16(len(exts)))
 	body = append(body, exts...)
 
-	hs := []byte{1, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}
+	if len(body) > 0xffffff {
+		panic("testgenpcap: CH body overflows 24-bit handshake length")
+	}
+	hs := []byte{1, wireconv.MustUint8(len(body) >> 16), wireconv.MustUint8((len(body) >> 8) & 0xff), wireconv.MustUint8(len(body) & 0xff)}
 	hs = append(hs, body...)
 	rec := []byte{22, 0x03, 0x01}
-	rec = binary.BigEndian.AppendUint16(rec, uint16(len(hs)))
+	rec = binary.BigEndian.AppendUint16(rec, wireconv.MustUint16(len(hs)))
 	return append(rec, hs...)
 }
 

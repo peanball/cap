@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.peanball.net/cap/internal/pcap"
+	"go.peanball.net/cap/internal/wireconv"
 )
 
 // Fixture is one named scenario. Data is the full classic-pcap byte stream;
@@ -124,9 +125,9 @@ func sniFragmented() []pcap.Record {
 		rec(EthIPv4(srv, cli, ds, cs, 9000, 1001, 0x12, nil), ms(1)),
 		rec(EthIPv4(cli, srv, cs, ds, 1001, 9001, 0x10, nil), ms(2)),
 		rec(EthIPv4(cli, srv, cs, ds, 1001, 9001, 0x18, ch[:splitAt]), ms(3)),
-		rec(EthIPv4(cli, srv, cs, ds, 1001+uint32(splitAt), 9001, 0x18, ch[splitAt:]), ms(4)),
-		rec(EthIPv4(srv, cli, ds, cs, 9001, 1001+uint32(len(ch)), 0x18, make([]byte, 50)), ms(5)),
-		rec(EthIPv4(cli, srv, cs, ds, 1001+uint32(len(ch)), 9051, 0x11, nil), ms(6)),
+		rec(EthIPv4(cli, srv, cs, ds, 1001+wireconv.MustUint32(splitAt), 9001, 0x18, ch[splitAt:]), ms(4)),
+		rec(EthIPv4(srv, cli, ds, cs, 9001, 1001+wireconv.MustUint32(len(ch)), 0x18, make([]byte, 50)), ms(5)),
+		rec(EthIPv4(cli, srv, cs, ds, 1001+wireconv.MustUint32(len(ch)), 9051, 0x11, nil), ms(6)),
 	}
 }
 
@@ -189,7 +190,7 @@ func unpack4in6() []pcap.Record {
 		rec(Eth6in4(cli6, srv6, cli4, srv4, 51000, 443, 1000, 0, 0x02, nil), ms(0)),
 		rec(Eth6in4(srv6, cli6, srv4, cli4, 443, 51000, 9000, 1001, 0x12, nil), ms(1)),
 		rec(Eth6in4(cli6, srv6, cli4, srv4, 51000, 443, 1001, 9001, 0x18, ch), ms(2)),
-		rec(Eth6in4(srv6, cli6, srv4, cli4, 443, 51000, 9001, 1001+uint32(len(ch)), 0x18, []byte("resp")), ms(3)),
+		rec(Eth6in4(srv6, cli6, srv4, cli4, 443, 51000, 9001, 1001+wireconv.MustUint32(len(ch)), 0x18, []byte("resp")), ms(3)),
 	}
 }
 
@@ -201,7 +202,7 @@ func unpack6in6() []pcap.Record {
 		rec(Eth6in6(cli6o, srv6o, cli6i, srv6i, 51000, 443, 1000, 0, 0x02, nil), ms(0)),
 		rec(Eth6in6(srv6o, cli6o, srv6i, cli6i, 443, 51000, 9000, 1001, 0x12, nil), ms(1)),
 		rec(Eth6in6(cli6o, srv6o, cli6i, srv6i, 51000, 443, 1001, 9001, 0x18, ch), ms(2)),
-		rec(Eth6in6(srv6o, cli6o, srv6i, cli6i, 443, 51000, 9001, 1001+uint32(len(ch)), 0x18, []byte("resp")), ms(3)),
+		rec(Eth6in6(srv6o, cli6o, srv6i, cli6i, 443, 51000, 9001, 1001+wireconv.MustUint32(len(ch)), 0x18, []byte("resp")), ms(3)),
 	}
 }
 
@@ -215,8 +216,8 @@ func unpackProxyRewrite() []pcap.Record {
 		rec(EthIPv4(mine, proxy, 50000, 443, 1000, 0, 0x02, nil), ms(0)),
 		rec(EthIPv4(proxy, mine, 443, 50000, 9000, 1001, 0x12, nil), ms(1)),
 		rec(EthIPv4(mine, proxy, 50000, 443, 1001, 9001, 0x18, hdr), ms(2)),
-		rec(EthIPv4(proxy, mine, 443, 50000, 9001, 1001+uint32(len(hdr)), 0x18, []byte("HTTP/1.1 200")), ms(3)),
-		rec(EthIPv4(mine, proxy, 50000, 443, 1001+uint32(len(hdr)), 9013, 0x18, []byte("more")), ms(4)),
+		rec(EthIPv4(proxy, mine, 443, 50000, 9001, 1001+wireconv.MustUint32(len(hdr)), 0x18, []byte("HTTP/1.1 200")), ms(3)),
+		rec(EthIPv4(mine, proxy, 50000, 443, 1001+wireconv.MustUint32(len(hdr)), 9013, 0x18, []byte("more")), ms(4)),
 	}
 }
 
@@ -237,8 +238,8 @@ func pktapSNI() []pcap.Record {
 		wrap(EthIPv4(cli, srv, cs, ds, 1000, 0, 0x02, nil), ms(0)),
 		wrap(EthIPv4(srv, cli, ds, cs, 9000, 1001, 0x12, nil), ms(1)),
 		wrap(EthIPv4(cli, srv, cs, ds, 1001, 9001, 0x18, ch), ms(2)),
-		wrap(EthIPv4(srv, cli, ds, cs, 9001, 1001+uint32(len(ch)), 0x18, []byte("resp")), ms(3)),
-		wrap(EthIPv4(cli, srv, cs, ds, 1001+uint32(len(ch)), 9042, 0x11, nil), ms(4)),
-		wrap(EthIPv4(srv, cli, ds, cs, 9042, 1002+uint32(len(ch)), 0x11, nil), ms(5)),
+		wrap(EthIPv4(srv, cli, ds, cs, 9001, 1001+wireconv.MustUint32(len(ch)), 0x18, []byte("resp")), ms(3)),
+		wrap(EthIPv4(cli, srv, cs, ds, 1001+wireconv.MustUint32(len(ch)), 9042, 0x11, nil), ms(4)),
+		wrap(EthIPv4(srv, cli, ds, cs, 9042, 1002+wireconv.MustUint32(len(ch)), 0x11, nil), ms(5)),
 	}
 }

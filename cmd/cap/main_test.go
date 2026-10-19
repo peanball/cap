@@ -15,6 +15,7 @@ import (
 	"go.peanball.net/cap/internal/match"
 	"go.peanball.net/cap/internal/pcap"
 	"go.peanball.net/cap/internal/testgenpcap"
+	"go.peanball.net/cap/internal/wireconv"
 )
 
 // loadFixture reads name out of testdata/ (populated by `go run ./test`,
@@ -167,7 +168,7 @@ func matchedStreamPcap(t *testing.T, nData int, closed bool) ([]byte, int) {
 	add(eth(dstMAC, srcMAC, srv, cli, 443, 50001, 9000, 1001, 0x12, nil))
 	add(eth(srcMAC, dstMAC, cli, srv, 50001, 443, 1001, 9001, 0x10, nil))
 	add(eth(srcMAC, dstMAC, cli, srv, 50001, 443, 1001, 9001, 0x18, ch))
-	seq := 1001 + uint32(len(ch))
+	seq := 1001 + wireconv.MustUint32(len(ch))
 	for i := 0; i < nData; i++ {
 		add(eth(srcMAC, dstMAC, cli, srv, 50001, 443, seq, 9001, 0x18, []byte("data")))
 		seq += 4
