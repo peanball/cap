@@ -1,0 +1,21 @@
+# .github/dependabot.yml — auto-bump gopacket and go-flags, GitHub Actions,
+# and the toolchain (go directive). Auto-merged via .github/workflows/dependabot.yml.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: [dependencies, github-actions]
+    cooldown:
+      default-days: 7
