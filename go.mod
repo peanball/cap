@@ -3,7 +3,7 @@ module go.peanball.net/cap
 go 1.25.0
 
 require (
-	github.com/gopacket/gopacket v1.7.4
+	github.com/gopacket/gopacket v1.7.7
 	github.com/jessevdk/go-flags v1.6.1
 )
 
